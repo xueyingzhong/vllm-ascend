@@ -675,6 +675,51 @@ def test_allgather_bf16_lora_skips_quant_backend_validation():
     assert output.dynamic_scale is None
 
 
+def test_allgather_eplb_masks_physical_redundant_experts_by_rank():
+    dispatcher = TokenDispatcherWithAllGather(
+        top_k=2,
+        num_experts=68,
+        num_local_experts=34,
+    )
+    hidden_states = torch.randn(2, 4)
+    topk_weights = torch.ones(2, 2)
+    topk_ids = torch.tensor([[0, 33], [34, 67]], dtype=torch.int32)
+    token_dispatch_input = build_token_dispatch_input_fixture(
+        hidden_states=hidden_states,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+        expert_map=torch.arange(64, dtype=torch.int32),
+        global_redundant_expert_num=4,
+    )
+    init_routing_output = (
+        hidden_states,
+        torch.arange(4, dtype=torch.int32),
+        torch.ones(34, dtype=torch.int32),
+        None,
+    )
+
+    with (
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.get_ep_group",
+            return_value=SimpleNamespace(rank_in_group=1),
+        ),
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.DeviceOperator.npu_moe_init_routing",
+            return_value=init_routing_output,
+        ) as mock_init_routing,
+    ):
+        output = dispatcher.token_dispatch(token_dispatch_input)
+
+    torch.testing.assert_close(
+        output.combine_metadata.topk_weights,
+        torch.tensor([[0.0, 0.0], [1.0, 1.0]]),
+    )
+    init_routing_call = mock_init_routing.call_args
+    torch.testing.assert_close(init_routing_call.args[1], topk_ids)
+    assert init_routing_call.kwargs["expert_num"] == 68
+    assert init_routing_call.kwargs["active_expert_range"] == [34, 68]
+
+
 class TestTokenDispatcherWithAllGather(TestBase):
     def setUp(self):
         # Mock dependencies

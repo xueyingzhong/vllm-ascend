@@ -391,10 +391,14 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
         if expert_map is not None:
             global_num_experts = len(expert_map) + global_redundant_expert_num
-            mask = expert_map[topk_ids] != -1
-            topk_weights = topk_weights * mask
             first_expert_idx = get_ep_group().rank_in_group * self.num_experts_local
             last_expert_idx = first_expert_idx + self.num_experts_local
+            # EPLB maps logical expert IDs to globally contiguous physical
+            # IDs before dispatch. Redundant experts can therefore have IDs
+            # beyond the logical expert_map and must be filtered by the local
+            # physical range instead of indexing the logical map.
+            local_expert_mask = (topk_ids >= first_expert_idx) & (topk_ids < last_expert_idx)
+            topk_weights = topk_weights * local_expert_mask
         else:
             first_expert_idx = 0
             last_expert_idx = self.num_experts_local
